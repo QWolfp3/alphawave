@@ -212,6 +212,14 @@ export interface ChatCompletionFunction {
      * about the format.
      */
     parameters: Schema;
+
+    /**
+     * Optional. Whether to enable strict schema adherence when generating the function call. 
+     * @remarks
+     * If set to true, the model will follow the exact schema defined in the parameters field. 
+     * Only a subset of JSON Schema is supported when strict is true. 
+     */
+    strict?: boolean;
 }
 
 /**
@@ -237,4 +245,18 @@ export interface JsonSchema {
      * Optional. Indicates whether the schema should be strictly enforced.
      */
     strict?: boolean;
+}
+
+export interface ChatCompletionTool {
+    /**
+     * The type of the tool.
+     * @remarks
+     * Currently only `function` is supported.
+     */
+    type: 'function';
+
+    /**
+     * The function to call.
+     */
+    function: ChatCompletionFunction;
 }

@@ -6,7 +6,7 @@ import { DefaultResponseValidator } from "./DefaultResponseValidator";
 import { MemoryFork } from "./MemoryFork";
 import { Colorize } from "./internals";
 import { OpenAIModel } from "./OpenAIModel";
-import { FunctionResponseValidator } from "./FunctionResponseValidator";
+import { ToolResponseValidator } from "./ToolResponseValidator";
 
 /**
  * Options for an AlphaWave instance.
@@ -326,8 +326,8 @@ export class AlphaWave extends (EventEmitter as { new(): AlphaWaveEmitter }) {
         // Create validator to use
         if (!this.options.validator) {
             // Check for an OpenAI model using functions
-            if (this.options.model instanceof OpenAIModel && this.options.model.options.functions) {
-                this.options.validator = new FunctionResponseValidator(this.options.model.options.functions);
+            if (this.options.model instanceof OpenAIModel && this.options.model.options.tools) {
+                this.options.validator = new ToolResponseValidator(this.options.model.options.tools);
             } else {
                 this.options.validator = new DefaultResponseValidator();
             }
@@ -398,10 +398,10 @@ export class AlphaWave extends (EventEmitter as { new(): AlphaWaveEmitter }) {
         const { prompt, memory, functions, tokenizer, validator, max_repair_attempts, history_variable, input_variable } = this.options;
         let { model } = this.options;
 
-        // Check for OpenAI model being used with a function validator
-        if (model instanceof OpenAIModel && validator instanceof FunctionResponseValidator && !model.options.functions) {
+        // Check for OpenAI model being used with a tool validator
+        if (model instanceof OpenAIModel && validator instanceof ToolResponseValidator && !model.options.tools) {
             // Create a clone of the model that's configured to use the validators functions
-            model = model.clone({ functions: validator.functions })
+            model = model.clone({ tools: validator.tools })
         }
 
         // Update/get user input

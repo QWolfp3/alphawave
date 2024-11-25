@@ -10,4 +10,5 @@ export * from "./OpenAIModel";
 export * from "./Response";
 export * from "./TestEmbeddings";
 export * from "./TestModel";
+export * from "./ToolResponseValidator";
 export * from "./types";
