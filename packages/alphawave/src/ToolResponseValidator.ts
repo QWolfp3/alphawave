@@ -1,24 +1,23 @@
-import { PromptResponseValidator, Validation, ChatCompletionFunction, PromptResponse } from "./types";
+import { PromptResponseValidator, Validation, ChatCompletionFunction, PromptResponse, ChatCompletionTool } from "./types";
 import { PromptMemory, PromptFunctions, Tokenizer, Message } from "promptrix";
 import { Schema } from "jsonschema";
 import { JSONResponseValidator } from "./JSONResponseValidator";
 
 /**
- * @deprecated
- * Validates function calls returned by the model.
+ * Validates tool calls returned by the model.
  * @remarks
  */
-export class FunctionResponseValidator implements PromptResponseValidator {
+export class ToolResponseValidator implements PromptResponseValidator {
     private readonly _functions: Map<string, ChatCompletionFunction> = new Map();
 
     /**
-     * Creates a new `FunctionResponseValidator` instance.
-     * @param functions Optional. List of functions supported for the prompt.
+     * Creates a new `ToolResponseValidator` instance.
+     * @param tools Optional. List of tools supported for the prompt.
      */
-    public constructor(functions?: ChatCompletionFunction[]) {
-        if (functions) {
-            for (const func of functions) {
-                this._functions.set(func.name, func);
+    public constructor(tools?: ChatCompletionTool[]) {
+        if (tools) {
+            for (const tool of tools) {
+                this._functions.set(tool.function.name, tool.function);
             }
         }
     }
@@ -33,7 +32,16 @@ export class FunctionResponseValidator implements PromptResponseValidator {
     }
 
     /**
-     * Adds a new function to teh validator.
+     * Gets a list of the tools configured for the validator.
+     */
+    public get tools(): ChatCompletionTool[] {
+        const list: ChatCompletionTool[] = [];
+        this._functions.forEach((fn, name) => list.push({ type: 'function', function: fn }));
+        return list;
+    }
+
+    /**
+     * Adds a new function to the validator.
      * @param name Name of the function.
      * @param description Optional. Description of how the model should use the function.
      * @param parameters Optional. JSON Schema for functions parameters.
@@ -58,14 +66,16 @@ export class FunctionResponseValidator implements PromptResponseValidator {
      * @returns A `Validation` with the status and value.
      */
     public async validateResponse(memory: PromptMemory, functions: PromptFunctions, tokenizer: Tokenizer, response: PromptResponse, remaining_attempts: number): Promise<Validation> {
-        if (typeof response.message == 'object' && response.message.function_call) {
+        // Validate individual tool calls
+        const tool_calls = response.message?.tool_calls ?? [];
+        for (const tool_call of tool_calls) {
             // Ensure name is specified
-            const function_call = response.message.function_call;
+            const function_call = tool_call.function;
             if (!function_call.name) {
                 return {
                     type: 'Validation',
                     valid: false,
-                    feedback: `Function name missing. Specify a valid function name.`
+                    feedback: `Function name missing for tool call. Specify a valid function name.`
                 };
             }
 
@@ -74,7 +84,7 @@ export class FunctionResponseValidator implements PromptResponseValidator {
                 return {
                     type: 'Validation',
                     valid: false,
-                    feedback: `Unknown function named "${function_call.name}". Specify a valid function name.`
+                    feedback: `Unknown function named "${function_call.name}". Specify a valid function name for tool call.`
                 };
             }
 
@@ -83,7 +93,7 @@ export class FunctionResponseValidator implements PromptResponseValidator {
             if (functionDef) {
                 const validator = new JSONResponseValidator(
                     functionDef.parameters,
-                    `No arguments were sent with function call. Call the "${function_call.name}" with required arguments as a valid JSON object.`,
+                    `No arguments were sent with tool call. Call the "${function_call.name}" with required arguments as a valid JSON object.`,
                     `The function arguments had errors. Apply these fixes and call "${function_call.name}" function again:`
                 );
                 const args = function_call.arguments === '{}' ? null : function_call.arguments ?? '{}'

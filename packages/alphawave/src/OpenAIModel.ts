@@ -1,6 +1,6 @@
 import axios, { AxiosInstance, AxiosResponse, AxiosRequestConfig } from 'axios';
 import { PromptFunctions, PromptMemory, PromptSection, Tokenizer } from "promptrix";
-import { PromptCompletionModel, PromptResponse, ChatCompletionFunction, PromptResponseDetails } from "./types";
+import { PromptCompletionModel, PromptResponse, ChatCompletionFunction, PromptResponseDetails, JsonSchema, ChatCompletionTool } from "./types";
 import { ChatCompletionRequestMessage, CreateChatCompletionRequest, CreateChatCompletionResponse, CreateCompletionRequest, CreateCompletionResponse, OpenAICreateChatCompletionRequest, OpenAICreateCompletionRequest } from "./internals";
 import { Colorize } from "./internals";
 
@@ -111,11 +111,13 @@ export interface BaseOpenAIModelOptions {
     requestConfig?: AxiosRequestConfig;
 
     /**
+     * @deprecated
      * Optional. A list of functions the model may generate JSON inputs for.
      */
     functions?: ChatCompletionFunction[];
 
     /**
+     * @deprecated
      * Optional. Controls how the model responds to function calls.
      * @remarks
      * `"none"` means the model does not call a function, and responds to the end-user.
@@ -131,7 +133,7 @@ export interface BaseOpenAIModelOptions {
      * @remarks
      * Only available on select models but lets you guarantee that the model will output a JSON object.
      */
-    response_format?: { type: 'json_object'; };
+    response_format?: { type: 'json_object' | 'json_schema'; json_schema?: JsonSchema; };
 
     /**
      * Optional. Specifies the seed to the model should use when generating its response.
@@ -139,6 +141,25 @@ export interface BaseOpenAIModelOptions {
      * Only available on select models but can be used to improve the models determinism in its responses.
      */
     seed?: number;
+
+    /**
+     * Optional. A list of tools the model may generate JSON inputs for.
+     */
+    tools?: ChatCompletionTool[];
+
+    /**
+     * Optional. Controls how the model responds to tool calls.
+     * @remarks
+     * Defaults to `auto`.
+     */
+    tool_choice?: 'auto' | 'none' | 'required' | ChatCompletionTool;
+
+    /**
+     * Optional. Whether to support calling tools in parallel.
+     * @remarks
+     * Defaults to `true`.
+     */
+    parallel_tool_calls?: boolean;
 }
 
 /**
@@ -302,133 +323,84 @@ export class OpenAIModel implements PromptCompletionModel {
         const startTime = Date.now();
         const max_input_tokens = this.options.max_input_tokens ?? 1024;
         if (this.options.completion_type == 'text') {
-            // Render prompt
-            const result = await prompt.renderAsText(memory, functions, tokenizer, max_input_tokens);
-            if (result.tooLong) {
-                return { 
-                    status: 'too_long', 
-                    prompt: result.output,
-                    error: `The generated text completion prompt had a length of ${result.length} tokens which exceeded the max_input_tokens of ${max_input_tokens}.`,
-                };
+            throw new Error('Text completions are no longer supported by OpenAI.');
+        }
+        
+        // Render prompt
+        const result = await prompt.renderAsMessages(memory, functions, tokenizer, max_input_tokens);
+        if (result.tooLong) {
+            return { 
+                status: 'too_long',
+                prompt: result.output, 
+                error: `The generated chat completion prompt had a length of ${result.length} tokens which exceeded the max_input_tokens of ${max_input_tokens}.` 
+            };
+        }
+        if (this.options.logRequests) {
+            console.log(Colorize.title('CHAT PROMPT:'));
+            console.log(Colorize.output(result.output));
+            if (Array.isArray(this.options.tools) && this.options.tools.length > 0) {
+                console.log(Colorize.title('TOOLS:'));
+                console.log(Colorize.output(this.options.tools));
             }
-            if (this.options.logRequests) {
-                console.log(Colorize.title('PROMPT:'));
-                console.log(Colorize.output(result.output));
+        }
+
+        // Call chat completion API
+        const request: CreateChatCompletionRequest = this.patchBreakingChanges(this.copyOptionsToRequest<CreateChatCompletionRequest>({
+            messages: result.output as ChatCompletionRequestMessage[],
+        }, this.options, [
+            'max_tokens', 'temperature', 'top_p', 'n', 'stream', 'logprobs', 'echo', 'stop', 'presence_penalty', 
+            'frequency_penalty', 'best_of', 'logit_bias', 'user', 'functions', 'function_call', 'response_format', 
+            'seed', 'tools', 'tool_choice', 'parallel_tool_calls'
+        ]));
+        const response = await this.createChatCompletion(request);
+        const request_duration = Date.now() - startTime;
+        if (this.options.logRequests) {
+            console.log(Colorize.title('CHAT RESPONSE:'));
+            console.log(Colorize.value('status', response.status));
+            console.log(Colorize.value('duration', request_duration, 'ms'));
+            console.log(Colorize.output(response.data));
+        }
+
+        // Process response
+        if (response.status < 300) {
+            const completion = response.data.choices[0];
+            const usage = response.data.usage;
+            const details: PromptResponseDetails = {
+                finish_reason: completion.finish_reason as any,
+                completion_tokens: usage?.completion_tokens ?? -1,
+                prompt_tokens: usage?.prompt_tokens ?? -1,
+                total_tokens: usage?.total_tokens ?? -1,
+                request_duration,
+            };
+
+            // Ensure message content is text
+            const message = completion.message ?? { role: 'assistant', content: '' };
+            if (typeof message.content == 'object') {
+                message.content = JSON.stringify(message.content);
             }
 
-            // Call text completion API
-            const request: CreateCompletionRequest = this.copyOptionsToRequest<CreateCompletionRequest>({
-                prompt: result.output,
-            }, this.options, ['max_tokens', 'temperature', 'top_p', 'n', 'stream', 'logprobs', 'echo', 'stop', 'presence_penalty', 'frequency_penalty', 'best_of', 'logit_bias', 'user']);
-            const response = await this.createCompletion(request);
-            const request_duration = Date.now() - startTime;;
+            return { 
+                status: 'success',
+                prompt: result.output, 
+                message, 
+                details 
+            };
+        } else if (response.status == 429 && !response.statusText.includes('quota')) {
             if (this.options.logRequests) {
-                console.log(Colorize.title('RESPONSE:'));
-                console.log(Colorize.value('status', response.status));
-                console.log(Colorize.value('duration', request_duration, 'ms'));
-                console.log(Colorize.output(response.data));
+                console.log(Colorize.title('HEADERS:'));
+                console.log(Colorize.output(response.headers));
             }
-
-            // Process response
-            if (response.status < 300) {
-                const completion = response.data.choices[0];
-                const usage = response.data.usage;
-                const details: PromptResponseDetails = {
-                    finish_reason: completion.finish_reason as any,
-                    completion_tokens: usage?.completion_tokens ?? -1,
-                    prompt_tokens: usage?.prompt_tokens ?? -1,
-                    total_tokens: usage?.total_tokens ?? -1,
-                    request_duration,
-                };
-                return { 
-                    status: 'success',
-                    prompt: result.output, 
-                    message: { role: 'assistant', content: completion.text ?? '' }, 
-                    details 
-                };
-            } else if (response.status == 429) {
-                if (this.options.logRequests) {
-                    console.log(Colorize.title('HEADERS:'));
-                    console.log(Colorize.output(response.headers));
-                }
-                return { 
-                    status: 'rate_limited',
-                    prompt: result.output, 
-                    error: `The text completion API returned a rate limit error.` 
-                }
-            } else {
-                return { 
-                    status: 'error',
-                    prompt: result.output, 
-                    error: `The text completion API returned an error status of ${response.status}: ${response.statusText}` 
-                };
+            return { 
+                status: 'rate_limited',
+                prompt: result.output, 
+                error: `The chat completion API returned a rate limit error.` 
             }
         } else {
-            // Render prompt
-            const result = await prompt.renderAsMessages(memory, functions, tokenizer, max_input_tokens);
-            if (result.tooLong) {
-                return { 
-                    status: 'too_long',
-                    prompt: result.output, 
-                    error: `The generated chat completion prompt had a length of ${result.length} tokens which exceeded the max_input_tokens of ${max_input_tokens}.` 
-                };
-            }
-            if (this.options.logRequests) {
-                console.log(Colorize.title('CHAT PROMPT:'));
-                console.log(Colorize.output(result.output));
-                if (Array.isArray(this.options.functions) && this.options.functions.length > 0) {
-                    console.log(Colorize.title('FUNCTIONS:'));
-                    console.log(Colorize.output(this.options.functions));
-                }
-            }
-
-            // Call chat completion API
-            const request: CreateChatCompletionRequest = this.copyOptionsToRequest<CreateChatCompletionRequest>({
-                messages: result.output as ChatCompletionRequestMessage[],
-            }, this.options, ['max_tokens', 'temperature', 'top_p', 'n', 'stream', 'logprobs', 'echo', 'stop', 'presence_penalty', 'frequency_penalty', 'best_of', 'logit_bias', 'user', 'functions', 'function_call', 'response_format', 'seed']);
-            const response = await this.createChatCompletion(request);
-            const request_duration = Date.now() - startTime;
-            if (this.options.logRequests) {
-                console.log(Colorize.title('CHAT RESPONSE:'));
-                console.log(Colorize.value('status', response.status));
-                console.log(Colorize.value('duration', request_duration, 'ms'));
-                console.log(Colorize.output(response.data));
-            }
-
-            // Process response
-            if (response.status < 300) {
-                const completion = response.data.choices[0];
-                const usage = response.data.usage;
-                const details: PromptResponseDetails = {
-                    finish_reason: completion.finish_reason as any,
-                    completion_tokens: usage?.completion_tokens ?? -1,
-                    prompt_tokens: usage?.prompt_tokens ?? -1,
-                    total_tokens: usage?.total_tokens ?? -1,
-                    request_duration,
-                };
-                return { 
-                    status: 'success',
-                    prompt: result.output, 
-                    message: completion.message ?? { role: 'assistant', content: '' }, 
-                    details 
-                };
-            } else if (response.status == 429) {
-                if (this.options.logRequests) {
-                    console.log(Colorize.title('HEADERS:'));
-                    console.log(Colorize.output(response.headers));
-                }
-                return { 
-                    status: 'rate_limited',
-                    prompt: result.output, 
-                    error: `The chat completion API returned a rate limit error.` 
-                }
-            } else {
-                return { 
-                    status: 'error',
-                    prompt: result.output, 
-                    error: `The chat completion API returned an error status of ${response.status}: ${response.statusText}` 
-                };
-            }
+            return { 
+                status: 'error',
+                prompt: result.output, 
+                error: `The chat completion API returned an error status of ${response.status}: ${response.statusText}` 
+            };
         }
     }
 
@@ -443,6 +415,39 @@ export class OpenAIModel implements PromptCompletionModel {
         }
 
         return target as TRequest;
+    }
+
+    protected patchBreakingChanges(request: CreateChatCompletionRequest): CreateChatCompletionRequest {
+        if (this._clientType == ClientType.OpenAI) {
+            const options = this.options as OpenAIModelOptions;
+            if (options.model.startsWith('o1-')) {
+                if (request.max_tokens !== undefined) {
+                    (request as any).max_completion_tokens = request.max_tokens;
+                    delete request.max_tokens;
+                }
+                if (request.temperature !== undefined) {
+                    delete request.temperature;
+                }
+                if (request.top_p !== undefined) {
+                    delete request.top_p;
+                }
+                if (request.frequency_penalty !== undefined) {
+                    delete request.frequency_penalty;
+                }
+                if (request.messages[0].role == 'system') {
+                    if (request.messages.length > 1 && request.messages[1].role == 'user') {
+                        // Merge 'system' message with 'user' message
+                        request.messages[1].content = `${request.messages[0].content}\n\n${request.messages[1].content}`;
+                        request.messages.shift();
+                    } else {
+                        // Convert 'system' message to 'user' message
+                        request.messages[0].role = 'user';
+                    }
+                }
+            }
+        }
+
+        return request;
     }
 
     /**
